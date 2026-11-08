@@ -1,0 +1,87 @@
+name: Build Unsigned iOS IPA (Dual N-Back)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Generate Xcode Project, Test & Build Unsigned IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 2. Generate 1024x1024 AppIcon.png programmatically
+        run: |
+          swift scripts/generate_icon.swift
+
+      - name: 3. Install XcodeGen & Generate DualNBack.xcodeproj
+        run: |
+          if ! command -v xcodegen &> /dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: 4. Run Unit Tests (SequenceGenerator & Adaptive Scoring)
+        run: |
+          SIM_UDID=$(xcrun simctl list devices available iPhone -j | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin).get('devices', {})
+          for runtime, devs in data.items():
+              if 'iOS' in runtime:
+                  for d in devs:
+                      if d.get('isAvailable') and 'iPhone' in d.get('name', ''):
+                          print(d['udid'])
+                          sys.exit(0)
+          " || true)
+
+          if [ -n "$SIM_UDID" ]; then
+            echo "Ejecutando pruebas unitarias en simulador ID: $SIM_UDID"
+            xcodebuild test \
+              -project DualNBack.xcodeproj \
+              -scheme DualNBack \
+              -destination "platform=iOS Simulator,id=$SIM_UDID" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO
+          else
+            echo "Compilando bundle de pruebas para simulador"
+            xcodebuild build-for-testing \
+              -project DualNBack.xcodeproj \
+              -scheme DualNBack \
+              -sdk iphonesimulator \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO
+          fi
+
+      - name: 5. Build Release .app for iOS Device (Unsigned)
+        run: |
+          xcodebuild -project DualNBack.xcodeproj \
+            -scheme DualNBack \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: 6. Package DualNBack.ipa
+        run: |
+          rm -rf Payload DualNBack.ipa
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/DualNBack.app Payload/
+          zip -r9 DualNBack.ipa Payload
+
+      - name: 7. Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualNBack-Unsigned-IPA
+          path: DualNBack.ipa
+          if-no-files-found: error
+          retention-days: 30

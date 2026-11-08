@@ -1,0 +1,8 @@
+# Xcode / Compilation artifacts
+build/
+DerivedData/
+Payload/
+*.ipa
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+.DS_Store
