@@ -17,13 +17,21 @@ struct SpanishVoiceOption: Identifiable, Equatable, Hashable {
     }
 }
 
-/// Motor de síntesis de voz de baja latencia en español para los estímulos auditivos
+/// Motor híbrido de voz de latencia cero:
+/// 1. Modo `.elevenLabs`: Reproduce desde memoria RAM (`[String: AVAudioPlayer]`) los 8 clips `.mp3` pre-generados.
+/// 2. Modo `.systemTTS` (y fallback automático): Usa `AVSpeechSynthesizer` con fonética explícita en español.
 @MainActor
 final class SpeechManager: ObservableObject {
     static let shared = SpeechManager()
     
     private let synthesizer = AVSpeechSynthesizer()
+    private let audioCache = ElevenLabsAudioCache.shared
     private var isWarmedUp = false
+    
+    /// Diccionario en memoria RAM con los 8 reproductores listos (`prepareToPlay()`)
+    private var preloadedPlayers: [String: AVAudioPlayer] = [:]
+    private var preloadedSignature: String = ""
+    private var previewSequenceTask: Task<Void, Never>?
     
     /// Diccionario fonético exacto en español (prohibido deletrear letras sueltas)
     static let phoneticDictionary: [String: String] = StimulusStep.phoneticDictionary
@@ -34,7 +42,7 @@ final class SpeechManager: ObservableObject {
         refreshAvailableVoices()
     }
     
-    /// Descubre y ordena todas las voces en español instaladas en el iPhone
+    /// Descubre y ordena todas las voces del sistema en español instaladas en el iPhone
     func refreshAvailableVoices() {
         let voices = AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.lowercased().hasPrefix("es") }
@@ -52,7 +60,6 @@ final class SpeechManager: ObservableObject {
             )
         }
         
-        // Ordenamos primero por calidad (Premium > Mejorada > Estándar), luego por región (es-MX > es-US > es-ES > es-*)
         availableSpanishVoices = mapped.sorted { lhs, rhs in
             if lhs.qualityRank != rhs.qualityRank {
                 return lhs.qualityRank > rhs.qualityRank
@@ -64,8 +71,12 @@ final class SpeechManager: ObservableObject {
         }
     }
     
-    /// Precalienta el motor TTS de iOS al abrir HomeView para eliminar cualquier latencia en el Turno 1
-    func warmUp() {
+    /// Precalienta el motor de audio y carga en RAM los 8 clips de ElevenLabs si ya están descargados
+    func warmUp(settings: GameSettings? = nil) {
+        if let settings {
+            prepareElevenLabsPlayersIfAvailable(settings: settings)
+        }
+        
         guard !isWarmedUp else { return }
         isWarmedUp = true
         refreshAvailableVoices()
@@ -75,7 +86,7 @@ final class SpeechManager: ObservableObject {
             try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
         } catch {
-            // Ignorar errores de sesión en simulador o segundo plano
+            // Ignorar errores de sesión en segundo plano
         }
         
         let silentUtterance = AVSpeechUtterance(string: " ")
@@ -87,15 +98,54 @@ final class SpeechManager: ObservableObject {
         synthesizer.speak(silentUtterance)
     }
     
+    /// Precarga en memoria RAM los 8 archivos `.mp3` de ElevenLabs y ejecuta `prepareToPlay()`
+    func prepareElevenLabsPlayersIfAvailable(settings: GameSettings, forceReload: Bool = false) {
+        let voiceId = settings.effectiveElevenLabsVoiceId
+        let modelId = settings.elevenLabsModelId
+        guard !voiceId.isEmpty else {
+            preloadedPlayers.removeAll()
+            preloadedSignature = ""
+            return
+        }
+        
+        let signature = "\(voiceId)_\(modelId)"
+        if !forceReload && preloadedSignature == signature && preloadedPlayers.count == 8 {
+            for player in preloadedPlayers.values {
+                player.prepareToPlay()
+            }
+            return
+        }
+        
+        guard audioCache.isVoiceFullyCached(voiceId: voiceId, modelId: modelId) else {
+            preloadedPlayers.removeAll()
+            preloadedSignature = ""
+            return
+        }
+        
+        preloadedPlayers = audioCache.loadPreparedPlayers(voiceId: voiceId, modelId: modelId)
+        preloadedSignature = preloadedPlayers.count == 8 ? signature : ""
+    }
+    
+    /// Limpia los reproductores en memoria RAM cuando se regeneran o borran los archivos en caché
+    func invalidatePreloadedCache() {
+        stopSpeaking()
+        preloadedPlayers.removeAll()
+        preloadedSignature = ""
+    }
+    
     /// Configura `AVAudioSession` en `.playback` + `.spokenAudio` sin `.mixWithOthers`
     /// para sonar incluso con el interruptor físico en Silencio y pausar música externa
-    func activateGameAudioSession() {
+    func activateGameAudioSession(settings: GameSettings? = nil) {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .spokenAudio, options: [])
             try session.setActive(true)
         } catch {
-            // Continuar de forma segura si el hardware de audio reporta advertencia
+            // Continuar de forma segura
+        }
+        
+        if let settings {
+            prepareElevenLabsPlayersIfAvailable(settings: settings)
         }
     }
     
@@ -110,24 +160,46 @@ final class SpeechManager: ObservableObject {
         }
     }
     
-    /// Detiene inmediatamente cualquier locución en curso
+    /// Detiene inmediatamente cualquier reproducción de ElevenLabs o locución de `AVSpeechSynthesizer`
     func stopSpeaking() {
+        previewSequenceTask?.cancel()
+        previewSequenceTask = nil
+        
+        for player in preloadedPlayers.values where player.isPlaying {
+            player.stop()
+            player.currentTime = 0
+        }
+        
         if synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
     }
     
-    /// Pronuncia la letra de un turno usando su fonética explícita en español y corte inmediato
+    /// Pronuncia la letra de un turno:
+    /// - Si está en modo `.elevenLabs` y las 8 letras están en caché, reproduce instantáneamente desde RAM (`0 ms` latencia).
+    /// - Si no, aplica fallback automático a `AVSpeechSynthesizer` sin interrumpir el juego.
     func speakLetter(_ letter: String, interval: Double, settings: GameSettings) {
         guard settings.voiceEnabled else { return }
         
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
+        stopSpeaking()
+        let key = letter.uppercased()
+        
+        // 1. Intentar reproducción instantánea con ElevenLabs desde RAM
+        if settings.voiceEngine == .elevenLabs {
+            prepareElevenLabsPlayersIfAvailable(settings: settings)
+            if let player = preloadedPlayers[key] {
+                player.stop()
+                player.currentTime = 0
+                player.volume = min(1.0, max(0.1, settings.voiceVolume))
+                player.enableRate = true
+                player.rate = interval <= 1.1 ? 1.15 : 1.0
+                player.play()
+                return
+            }
         }
         
-        let key = letter.uppercased()
+        // 2. Fallback automático a la voz del sistema en español (`AVSpeechSynthesizer`)
         let phoneticWord = Self.phoneticDictionary[key] ?? letter.lowercased()
-        
         let utterance = AVSpeechUtterance(string: phoneticWord)
         utterance.voice = resolveVoice(preferredIdentifier: settings.selectedVoiceIdentifier)
         utterance.volume = min(1.0, max(0.1, settings.voiceVolume))
@@ -139,13 +211,37 @@ final class SpeechManager: ObservableObject {
         synthesizer.speak(utterance)
     }
     
-    /// Pronuncia la frase de prueba `"hache, jota, ka"` en la pantalla de Ajustes
+    /// Reproduce en secuencia `"hache"`, `"jota"`, `"ka"` en la pantalla de Ajustes
     func previewVoice(settings: GameSettings) {
-        activateGameAudioSession()
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
+        stopSpeaking()
+        activateGameAudioSession(settings: settings)
+        
+        if settings.voiceEngine == .elevenLabs {
+            prepareElevenLabsPlayersIfAvailable(settings: settings, forceReload: true)
+            if preloadedPlayers.count == 8 {
+                let sampleLetters = ["H", "J", "K"]
+                previewSequenceTask = Task { [weak self] in
+                    guard let self else { return }
+                    for (index, letter) in sampleLetters.enumerated() {
+                        if Task.isCancelled { return }
+                        if let player = self.preloadedPlayers[letter] {
+                            player.stop()
+                            player.currentTime = 0
+                            player.volume = min(1.0, max(0.1, settings.voiceVolume))
+                            player.enableRate = true
+                            player.rate = 1.0
+                            player.play()
+                        }
+                        if index < sampleLetters.count - 1 {
+                            try? await Task.sleep(nanoseconds: 650_000_000)
+                        }
+                    }
+                }
+                return
+            }
         }
         
+        // Fallback o modo Voz del iPhone
         let utterance = AVSpeechUtterance(string: "hache, jota, ka")
         utterance.voice = resolveVoice(preferredIdentifier: settings.selectedVoiceIdentifier)
         utterance.volume = min(1.0, max(0.1, settings.voiceVolume))
@@ -157,7 +253,7 @@ final class SpeechManager: ObservableObject {
         synthesizer.speak(utterance)
     }
     
-    /// Selecciona la voz óptima en español según la preferencia del usuario o la jerarquía de calidad/región
+    /// Selecciona la voz óptima del sistema en español según la preferencia del usuario o jerarquía de calidad/región
     func resolveVoice(preferredIdentifier: String?) -> AVSpeechSynthesisVoice? {
         if let preferredIdentifier,
            !preferredIdentifier.isEmpty,
@@ -179,7 +275,7 @@ final class SpeechManager: ObservableObject {
             ?? AVSpeechSynthesisVoice(language: "es-ES")
     }
     
-    // MARK: - Helpers de Prioridad de Voz
+    // MARK: - Helpers de Prioridad de Voz del Sistema
     
     private static func qualityInfo(for quality: AVSpeechSynthesisVoiceQuality) -> (label: String, rank: Int) {
         switch quality {

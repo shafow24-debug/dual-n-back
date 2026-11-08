@@ -143,7 +143,7 @@ struct HomeView: View {
             }
         }
         .onAppear {
-            SpeechManager.shared.warmUp()
+            SpeechManager.shared.warmUp(settings: storage.settings)
         }
         .sheet(item: $activeDestination) { destination in
             switch destination {

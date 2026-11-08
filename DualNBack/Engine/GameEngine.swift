@@ -175,7 +175,7 @@ final class GameEngine: ObservableObject {
         
         setIdleTimerDisabled(true)
         haptics.prepare()
-        speech.activateGameAudioSession()
+        speech.activateGameAudioSession(settings: storage.settings)
         
         runGameLoop(startingAtTurn: 0, includeCountdown: true)
     }
@@ -212,7 +212,7 @@ final class GameEngine: ObservableObject {
         } else {
             setIdleTimerDisabled(true)
             haptics.prepare()
-            speech.activateGameAudioSession()
+            speech.activateGameAudioSession(settings: storage.settings)
             runGameLoop(startingAtTurn: currentTurnIndex, includeCountdown: false)
         }
     }
@@ -281,6 +281,25 @@ final class GameEngine: ObservableObject {
         
         gameLoopTask = Task { [weak self] in
             guard let self else { return }
+            
+            // Si el motor es ElevenLabs y la voz seleccionada aún no está en caché,
+            // intenta precargar los 8 archivos antes de iniciar la partida (nunca durante un turno).
+            if self.storage.settings.voiceEngine == .elevenLabs {
+                let voiceId = self.storage.settings.effectiveElevenLabsVoiceId
+                let modelId = self.storage.settings.elevenLabsModelId
+                let apiKey = KeychainHelper.loadAPIKey()
+                if !voiceId.isEmpty && !apiKey.isEmpty &&
+                    !ElevenLabsAudioCache.shared.isVoiceFullyCached(voiceId: voiceId, modelId: modelId) {
+                    self.phase = .countdown(3)
+                    try? await ElevenLabsService.shared.downloadAllEightLetters(
+                        apiKey: apiKey,
+                        voiceId: voiceId,
+                        modelId: modelId,
+                        onProgress: { _, _ in }
+                    )
+                }
+                self.speech.prepareElevenLabsPlayersIfAvailable(settings: self.storage.settings)
+            }
             
             if includeCountdown {
                 for count in stride(from: 3, through: 1, by: -1) {

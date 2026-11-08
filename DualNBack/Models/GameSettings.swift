@@ -1,5 +1,48 @@
 import Foundation
 
+/// Motor de voz seleccionado por el usuario
+enum VoiceEngineType: String, Codable, CaseIterable, Identifiable {
+    case elevenLabs = "elevenLabs"
+    case systemTTS = "systemTTS"
+    
+    var id: String { rawValue }
+    
+    var displayTitle: String {
+        switch self {
+        case .elevenLabs:
+            return "ElevenLabs AI"
+        case .systemTTS:
+            return "Voz del iPhone"
+        }
+    }
+}
+
+/// Modelos soportados de ElevenLabs para español
+enum ElevenLabsModel: String, Codable, CaseIterable, Identifiable {
+    case multilingualV2 = "eleven_multilingual_v2"
+    case flashV2_5 = "eleven_flash_v2_5"
+    
+    var id: String { rawValue }
+    
+    var displayTitle: String {
+        switch self {
+        case .multilingualV2:
+            return "Multilingual v2 (Máxima Calidad)"
+        case .flashV2_5:
+            return "Flash v2.5 (Rápido)"
+        }
+    }
+    
+    var shortTitle: String {
+        switch self {
+        case .multilingualV2:
+            return "Multilingual v2"
+        case .flashV2_5:
+            return "Flash v2.5"
+        }
+    }
+}
+
 /// Nivel de interferencia por señuelos (Lures a N-1 y N+1)
 enum LureLevel: Double, Codable, CaseIterable, Identifiable {
     case low = 0.10
@@ -56,6 +99,22 @@ struct GameSettings: Codable, Equatable {
     var selectedVoiceIdentifier: String?
     var voiceVolume: Float
     
+    // Preferencias de ElevenLabs AI
+    var voiceEngine: VoiceEngineType
+    var elevenLabsVoiceId: String
+    var elevenLabsVoiceName: String
+    var elevenLabsCustomVoiceId: String
+    var elevenLabsModelId: String
+    
+    /// Devuelve el Voice ID efectivo (priorizando el Voice ID manual si el usuario escribió uno)
+    var effectiveElevenLabsVoiceId: String {
+        let manual = elevenLabsCustomVoiceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !manual.isEmpty {
+            return manual
+        }
+        return elevenLabsVoiceId.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
     init(
         currentN: Int = 2,
         isAdaptive: Bool = true,
@@ -68,7 +127,12 @@ struct GameSettings: Codable, Equatable {
         fixationCrossEnabled: Bool = true,
         voiceEnabled: Bool = true,
         selectedVoiceIdentifier: String? = nil,
-        voiceVolume: Float = 1.0
+        voiceVolume: Float = 1.0,
+        voiceEngine: VoiceEngineType = .elevenLabs,
+        elevenLabsVoiceId: String = "",
+        elevenLabsVoiceName: String = "",
+        elevenLabsCustomVoiceId: String = "",
+        elevenLabsModelId: String = ElevenLabsModel.multilingualV2.rawValue
     ) {
         self.currentN = min(9, max(1, currentN))
         self.isAdaptive = isAdaptive
@@ -82,6 +146,11 @@ struct GameSettings: Codable, Equatable {
         self.voiceEnabled = voiceEnabled
         self.selectedVoiceIdentifier = selectedVoiceIdentifier
         self.voiceVolume = min(1.0, max(0.1, voiceVolume))
+        self.voiceEngine = voiceEngine
+        self.elevenLabsVoiceId = elevenLabsVoiceId
+        self.elevenLabsVoiceName = elevenLabsVoiceName
+        self.elevenLabsCustomVoiceId = elevenLabsCustomVoiceId
+        self.elevenLabsModelId = elevenLabsModelId.isEmpty ? ElevenLabsModel.multilingualV2.rawValue : elevenLabsModelId
     }
     
     enum CodingKeys: String, CodingKey {
@@ -97,6 +166,11 @@ struct GameSettings: Codable, Equatable {
         case voiceEnabled
         case selectedVoiceIdentifier
         case voiceVolume
+        case voiceEngine
+        case elevenLabsVoiceId
+        case elevenLabsVoiceName
+        case elevenLabsCustomVoiceId
+        case elevenLabsModelId
     }
     
     init(from decoder: Decoder) throws {
@@ -114,6 +188,12 @@ struct GameSettings: Codable, Equatable {
         let voiceId = try container.decodeIfPresent(String.self, forKey: .selectedVoiceIdentifier)
         let volume = try container.decodeIfPresent(Float.self, forKey: .voiceVolume) ?? 1.0
         
+        let engine = try container.decodeIfPresent(VoiceEngineType.self, forKey: .voiceEngine) ?? .elevenLabs
+        let elVoiceId = try container.decodeIfPresent(String.self, forKey: .elevenLabsVoiceId) ?? ""
+        let elVoiceName = try container.decodeIfPresent(String.self, forKey: .elevenLabsVoiceName) ?? ""
+        let elCustomVoiceId = try container.decodeIfPresent(String.self, forKey: .elevenLabsCustomVoiceId) ?? ""
+        let elModelId = try container.decodeIfPresent(String.self, forKey: .elevenLabsModelId) ?? ElevenLabsModel.multilingualV2.rawValue
+        
         self.init(
             currentN: n,
             isAdaptive: adaptive,
@@ -126,7 +206,12 @@ struct GameSettings: Codable, Equatable {
             fixationCrossEnabled: cross,
             voiceEnabled: voice,
             selectedVoiceIdentifier: voiceId,
-            voiceVolume: volume
+            voiceVolume: volume,
+            voiceEngine: engine,
+            elevenLabsVoiceId: elVoiceId,
+            elevenLabsVoiceName: elVoiceName,
+            elevenLabsCustomVoiceId: elCustomVoiceId,
+            elevenLabsModelId: elModelId
         )
     }
 }

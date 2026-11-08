@@ -195,4 +195,64 @@ final class SequenceAndScoringTests: XCTestCase {
         XCTAssertEqual(manual.nextN, 4)
         XCTAssertEqual(manual.progression, .manual)
     }
+    
+    // MARK: - 5. Compatibilidad hacia atrás de `GameSettings` y Caché de ElevenLabs
+    
+    func testBackwardCompatibleGameSettingsDecoding() throws {
+        let legacyJSON = """
+        {
+          "currentN": 3,
+          "isAdaptive": true,
+          "dailyGoal": 6,
+          "defaultInterval": 1.8,
+          "defaultDuration": 90,
+          "lureRate": 0.2,
+          "hapticsEnabled": true,
+          "visualFeedbackEnabled": true,
+          "fixationCrossEnabled": true,
+          "voiceEnabled": true,
+          "voiceVolume": 0.85
+        }
+        """.data(using: .utf8)!
+        
+        let decoded = try JSONDecoder().decode(GameSettings.self, from: legacyJSON)
+        XCTAssertEqual(decoded.currentN, 3)
+        XCTAssertEqual(decoded.dailyGoal, 6)
+        XCTAssertEqual(decoded.voiceEngine, .elevenLabs)
+        XCTAssertEqual(decoded.elevenLabsModelId, ElevenLabsModel.multilingualV2.rawValue)
+    }
+    
+    func testElevenLabsVoiceSortingAndLocalCache() throws {
+        let premadeVoice = ElevenLabsVoice(
+            voice_id: "pre1",
+            name: "Adam",
+            category: "premade",
+            labels: ["language": "es"],
+            preview_url: nil
+        )
+        let clonedVoice = ElevenLabsVoice(
+            voice_id: "clone1",
+            name: "Mi Voz Clonada",
+            category: "cloned",
+            labels: ["accent": "mexican"],
+            preview_url: nil
+        )
+        
+        let sorted = ElevenLabsService.sortVoices([premadeVoice, clonedVoice])
+        XCTAssertEqual(sorted.first?.voice_id, "clone1", "Las voces clonadas deben aparecer antes que las premade.")
+        
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let cache = ElevenLabsAudioCache(customRootDirectory: tempDir)
+        defer { cache.clearAllCache() }
+        
+        XCTAssertFalse(cache.isVoiceFullyCached(voiceId: "clone1", modelId: "eleven_multilingual_v2"))
+        
+        let dummyMP3 = Data(repeating: 0x55, count: 1024)
+        for item in ElevenLabsAudioCache.lettersToPhoneticFilename {
+            try cache.saveAudioData(dummyMP3, forLetter: item.letter, voiceId: "clone1", modelId: "eleven_multilingual_v2")
+        }
+        
+        XCTAssertEqual(cache.cachedLettersCount(voiceId: "clone1", modelId: "eleven_multilingual_v2"), 8)
+        XCTAssertTrue(cache.isVoiceFullyCached(voiceId: "clone1", modelId: "eleven_multilingual_v2"))
+    }
 }
